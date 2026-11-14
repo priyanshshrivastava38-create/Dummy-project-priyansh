@@ -1,0 +1,138 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { Loader2, Sparkles } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Alert } from "@/components/ui/alert";
+import type { CriterionKey } from "@/lib/scoring/engine";
+
+export function AiSummary({
+  requestId,
+  weights,
+}: {
+  requestId: string;
+  weights: Record<CriterionKey, number>;
+}) {
+  const [summary, setSummary] = useState<string | null>(null);
+  const [provider, setProvider] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const textRef = useRef<HTMLParagraphElement>(null);
+
+  useEffect(() => {
+    const node = textRef.current;
+    if (!summary || !node) return;
+    if (document.hidden || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      node.textContent = summary;
+      return;
+    }
+    let count = 0;
+    const step = Math.max(2, Math.ceil(summary.length / 200));
+    node.textContent = "";
+    node.classList.add("typing-caret");
+    const timer = window.setInterval(() => {
+      count = Math.min(summary.length, count + step);
+      node.textContent = summary.slice(0, count);
+      if (count >= summary.length) {
+        window.clearInterval(timer);
+        node.classList.remove("typing-caret");
+      }
+    }, 16);
+    return () => {
+      window.clearInterval(timer);
+      node.classList.remove("typing-caret");
+      node.textContent = summary;
+    };
+  }, [summary]);
+
+  const generate = async () => {
+    setPending(true);
+    setError(null);
+    setSummary(null);
+    try {
+      const response = await fetch(`/api/requests/${requestId}/summary`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ weights }),
+      });
+      const data = (await response.json()) as {
+        summary?: string;
+        provider?: { label: string; model: string };
+        error?: string;
+      };
+      if (!response.ok || !data.summary) {
+        setError(data.error ?? "The summary could not be generated.");
+      } else {
+        setSummary(data.summary);
+        setProvider(data.provider ? `${data.provider.label} · ${data.provider.model}` : null);
+      }
+    } catch {
+      setError("The summary service could not be reached. Scores above are unaffected.");
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs text-muted-foreground">
+          AI can summarise the comparison, but it never changes scores or awards a contract.
+        </p>
+        <Button
+          size="sm"
+          onClick={generate}
+          disabled={pending}
+          className="sheen bg-gradient-to-r from-indigo-500 to-violet-500 text-white shadow-sm shadow-indigo-500/25 hover:from-indigo-400 hover:to-violet-400"
+        >
+          {pending ? <Loader2 className="animate-spin" /> : <Sparkles />}
+          {pending ? "Drafting summary…" : summary ? "Regenerate summary" : "Generate AI summary"}
+        </Button>
+      </div>
+
+      {error ? (
+        <Alert tone="warning" title="Summary unavailable">
+          {error} Deterministic scores and ranking are still fully available.
+        </Alert>
+      ) : null}
+
+      {pending ? (
+        <div
+          className="reveal rounded-xl border border-indigo-100 bg-gradient-to-br from-indigo-50/60 via-white to-violet-50/40 p-4"
+          aria-busy="true"
+        >
+          <p className="flex items-center gap-2 text-xs font-medium text-indigo-700">
+            <Sparkles className="size-3.5 animate-pulse" />
+            Drafting an explanation from the fixed scores…
+          </p>
+          <div className="mt-3 space-y-2">
+            <div className="shimmer h-2.5 w-full rounded-full" />
+            <div className="shimmer h-2.5 w-11/12 rounded-full" />
+            <div className="shimmer h-2.5 w-3/4 rounded-full" />
+          </div>
+        </div>
+      ) : null}
+
+      {summary ? (
+        <div
+          className="reveal relative overflow-hidden rounded-xl border border-indigo-100 bg-gradient-to-br from-indigo-50/70 via-white to-violet-50/50 p-4"
+          aria-live="polite"
+        >
+          <div
+            aria-hidden
+            className="pointer-events-none absolute -right-10 -top-12 size-36 rounded-full bg-violet-300/25 blur-2xl"
+          />
+          <p className="relative flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-indigo-600">
+            <Sparkles className="size-3" /> AI narrative
+          </p>
+          <p ref={textRef} aria-hidden className="relative mt-2 text-sm leading-relaxed" />
+          <span className="sr-only">{summary}</span>
+          {provider ? <p className="relative mt-2 text-[11px] text-muted-foreground">Generated by {provider}</p> : null}
+          <p className="relative mt-2 border-t border-indigo-100/70 pt-2 text-[11px] text-muted-foreground">
+            Written from the deterministic scores above. It cannot change a score or pick a winner.
+          </p>
+        </div>
+      ) : null}
+    </div>
+  );
+}

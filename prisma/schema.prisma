@@ -1,0 +1,522 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  ADMIN
+  PROCUREMENT_MANAGER
+  APPROVER
+}
+
+enum RequestStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  SOURCING
+  COMPLETED
+  CANCELLED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum VendorStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ComplianceStatus {
+  COMPLIANT
+  PENDING
+  NON_COMPLIANT
+}
+
+enum QuotationStatus {
+  RECEIVED
+  UNDER_REVIEW
+  SHORTLISTED
+  SELECTED
+  NOT_SELECTED
+}
+
+enum ExtractionSource {
+  AI
+  MANUAL
+  AI_CORRECTED
+}
+
+enum ExtractionStatus {
+  PENDING
+  PROCESSING
+  EXTRACTED
+  FAILED
+  MANUAL
+}
+
+enum ApprovalStepStatus {
+  WAITING
+  PENDING
+  APPROVED
+  REJECTED
+  CLARIFICATION_REQUESTED
+  SKIPPED
+}
+
+enum ApprovalActionType {
+  APPROVE
+  REJECT
+  REQUEST_CLARIFICATION
+  COMMENT
+  RESUBMIT
+  CANCEL
+}
+
+enum ContractStatus {
+  DRAFT
+  ACTIVE
+  EXPIRING
+  EXPIRED
+  RENEWED
+  TERMINATED
+}
+
+// ---------------------------------------------------------------------------
+// Organisation, people and access
+// ---------------------------------------------------------------------------
+
+model Organisation {
+  id             String   @id @default(cuid())
+  name           String
+  slug           String   @unique
+  currency       String   @default("USD")
+  demoMode       Boolean  @default(true) @map("demo_mode")
+  defaultWeights Json     @default("{\"price\":35,\"delivery\":20,\"quality\":20,\"reliability\":15,\"payment\":10}") @map("default_weights")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  profiles       Profile[]
+  departments    Department[]
+  requests       PurchaseRequest[]
+  vendors        Vendor[]
+  quotations     Quotation[]
+  evaluations    VendorEvaluation[]
+  workflows      ApprovalWorkflow[]
+  contracts      Contract[]
+  activities     Activity[]
+  auditLogs      AuditLog[]
+
+  @@map("organisations")
+}
+
+model Profile {
+  id           String    @id @default(cuid())
+  orgId        String    @map("org_id")
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  fullName     String    @map("full_name")
+  title        String?
+  role         Role      @default(APPROVER)
+  departmentId String?   @map("department_id")
+  isActive     Boolean   @default(true) @map("is_active")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  lastLoginAt  DateTime? @map("last_login_at")
+
+  organisation     Organisation       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  department       Department?        @relation("DepartmentMembers", fields: [departmentId], references: [id], onDelete: SetNull)
+  headedDepartment Department?        @relation("DepartmentHead")
+  sessions         Session[]
+  requests         PurchaseRequest[]  @relation("Requester")
+  approvalSteps    ApprovalStep[]     @relation("Approver")
+  approvalActions  ApprovalAction[]   @relation("ActionActor")
+  evaluations      VendorEvaluation[] @relation("Evaluator")
+  ownedContracts   Contract[]         @relation("ContractOwner")
+  uploadedDocs     QuotationDocument[] @relation("DocumentUploader")
+  requestDocs      RequestDocument[]  @relation("RequestDocumentUploader")
+  activities       Activity[]         @relation("ActivityActor")
+  auditLogs        AuditLog[]         @relation("AuditActor")
+
+  @@index([orgId, role])
+  @@index([departmentId])
+  @@map("profiles")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique @map("token_hash")
+  userId    String   @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  ip        String?
+  userAgent String?  @map("user_agent")
+
+  user Profile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model Department {
+  id           String   @id @default(cuid())
+  orgId        String   @map("org_id")
+  name         String
+  code         String
+  annualBudget Decimal? @map("annual_budget") @db.Decimal(14, 2)
+  headId       String?  @unique @map("head_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  organisation Organisation      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  members      Profile[]         @relation("DepartmentMembers")
+  head         Profile?          @relation("DepartmentHead", fields: [headId], references: [id], onDelete: SetNull)
+  requests     PurchaseRequest[]
+
+  @@unique([orgId, code])
+  @@index([orgId])
+  @@map("departments")
+}
+
+model ApprovalWorkflow {
+  id                String   @id @default(cuid())
+  orgId             String   @map("org_id")
+  name              String
+  minAmount         Decimal  @map("min_amount") @db.Decimal(14, 2)
+  maxAmount         Decimal? @map("max_amount") @db.Decimal(14, 2)
+  levels            Int      @default(1)
+  secondLevelRole   Role?    @default(ADMIN) @map("second_level_role")
+  isActive          Boolean  @default(true) @map("is_active")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  organisation Organisation @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, isActive])
+  @@map("approval_workflows")
+}
+
+// ---------------------------------------------------------------------------
+// Procurement
+// ---------------------------------------------------------------------------
+
+model PurchaseRequest {
+  id                String         @id @default(cuid())
+  reference         String
+  orgId             String         @map("org_id")
+  title             String
+  description       String
+  category          String
+  departmentId      String         @map("department_id")
+  requesterId       String         @map("requester_id")
+  estimatedBudget   Decimal        @map("estimated_budget") @db.Decimal(14, 2)
+  priority          Priority       @default(MEDIUM)
+  requiredBy        DateTime?      @map("required_by") @db.Date
+  status            RequestStatus  @default(DRAFT)
+  rejectionReason   String?        @map("rejection_reason")
+  cancellationReason String?       @map("cancellation_reason")
+  scoringWeights    Json?          @map("scoring_weights")
+  recommendedVendorId String?      @map("recommended_vendor_id")
+  submittedAt       DateTime?      @map("submitted_at")
+  approvedAt        DateTime?      @map("approved_at")
+  completedAt       DateTime?      @map("completed_at")
+  createdAt         DateTime       @default(now()) @map("created_at")
+  updatedAt         DateTime       @updatedAt @map("updated_at")
+
+  organisation       Organisation        @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  department         Department          @relation(fields: [departmentId], references: [id])
+  requester          Profile             @relation("Requester", fields: [requesterId], references: [id])
+  recommendedVendor  Vendor?             @relation("RecommendedVendor", fields: [recommendedVendorId], references: [id], onDelete: SetNull)
+  items              PurchaseRequestItem[]
+  quotations         Quotation[]
+  approvalSteps      ApprovalStep[]
+  approvalActions    ApprovalAction[]
+  documents          RequestDocument[]
+  evaluations        VendorEvaluation[]
+  activities         Activity[]
+
+  @@unique([orgId, reference])
+  @@index([orgId, status])
+  @@index([orgId, createdAt])
+  @@index([departmentId])
+  @@index([requesterId])
+  @@map("purchase_requests")
+}
+
+model PurchaseRequestItem {
+  id                 String  @id @default(cuid())
+  requestId          String  @map("request_id")
+  description        String
+  quantity           Int     @default(1)
+  unit               String  @default("unit")
+  estimatedUnitPrice Decimal @map("estimated_unit_price") @db.Decimal(14, 2)
+
+  request PurchaseRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([requestId])
+  @@map("purchase_request_items")
+}
+
+model RequestDocument {
+  id            String   @id @default(cuid())
+  requestId     String   @map("request_id")
+  fileName      String   @map("file_name")
+  storageKey    String   @map("storage_key")
+  mimeType      String   @map("mime_type")
+  sizeBytes     Int      @map("size_bytes")
+  uploadedById  String   @map("uploaded_by_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  request    PurchaseRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  uploadedBy Profile         @relation("RequestDocumentUploader", fields: [uploadedById], references: [id])
+
+  @@index([requestId])
+  @@map("purchase_request_documents")
+}
+
+model Vendor {
+  id                  String           @id @default(cuid())
+  orgId               String           @map("org_id")
+  name                String
+  contactName         String           @map("contact_name")
+  email               String
+  phone               String?
+  category            String
+  taxId               String?          @map("tax_id")
+  status              VendorStatus     @default(ACTIVE)
+  performanceRating   Int?             @map("performance_rating")
+  deliveryReliability Int?             @map("delivery_reliability")
+  complianceStatus    ComplianceStatus @default(PENDING) @map("compliance_status")
+  notes               String?
+  createdAt           DateTime         @default(now()) @map("created_at")
+  updatedAt           DateTime         @updatedAt @map("updated_at")
+
+  organisation      Organisation       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  quotations        Quotation[]
+  evaluations       VendorEvaluation[]
+  contracts         Contract[]
+  recommendedRequests PurchaseRequest[] @relation("RecommendedVendor")
+
+  @@unique([orgId, name])
+  @@index([orgId, status])
+  @@index([orgId, category])
+  @@map("vendors")
+}
+
+model Quotation {
+  id                  String           @id @default(cuid())
+  orgId               String           @map("org_id")
+  requestId           String           @map("request_id")
+  vendorId            String           @map("vendor_id")
+  status              QuotationStatus  @default(RECEIVED)
+  currency            String           @default("USD")
+  subtotal            Decimal?         @db.Decimal(14, 2)
+  taxAmount           Decimal?         @map("tax_amount") @db.Decimal(14, 2)
+  additionalCharges   Decimal?         @map("additional_charges") @db.Decimal(14, 2)
+  totalAmount         Decimal?         @map("total_amount") @db.Decimal(14, 2)
+  deliveryDays        Int?             @map("delivery_days")
+  paymentTerms        String?          @map("payment_terms")
+  warrantyMonths      Int?             @map("warranty_months")
+  validityDate        DateTime?        @map("validity_date") @db.Date
+  notes               String?
+  extractionSource    ExtractionSource @default(MANUAL) @map("extraction_source")
+  extractionConfidence Int?            @map("extraction_confidence")
+  extractionModel     String?          @map("extraction_model")
+  extractedData       Json?            @map("extracted_data")
+  createdAt           DateTime         @default(now()) @map("created_at")
+  updatedAt           DateTime         @updatedAt @map("updated_at")
+
+  organisation Organisation       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  request      PurchaseRequest    @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  vendor       Vendor             @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  items        QuotationItem[]
+  documents    QuotationDocument[]
+  evaluations  VendorEvaluation[]
+
+  @@unique([requestId, vendorId])
+  @@index([orgId])
+  @@index([requestId])
+  @@index([vendorId])
+  @@map("quotations")
+}
+
+model QuotationItem {
+  id          String  @id @default(cuid())
+  quotationId String  @map("quotation_id")
+  description String
+  quantity    Int     @default(1)
+  unitPrice   Decimal @map("unit_price") @db.Decimal(14, 2)
+  total       Decimal @db.Decimal(14, 2)
+
+  quotation Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+
+  @@index([quotationId])
+  @@map("quotation_items")
+}
+
+model QuotationDocument {
+  id               String           @id @default(cuid())
+  quotationId      String           @map("quotation_id")
+  fileName         String           @map("file_name")
+  storageKey       String           @map("storage_key")
+  mimeType         String           @map("mime_type")
+  sizeBytes        Int              @map("size_bytes")
+  uploadedById     String           @map("uploaded_by_id")
+  extractedText    String?          @map("extracted_text") @db.Text
+  extractionStatus ExtractionStatus @default(PENDING) @map("extraction_status")
+  extractionError  String?          @map("extraction_error")
+  createdAt        DateTime         @default(now()) @map("created_at")
+
+  quotation  Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  uploadedBy Profile   @relation("DocumentUploader", fields: [uploadedById], references: [id])
+
+  @@index([quotationId])
+  @@map("quotation_documents")
+}
+
+model VendorEvaluation {
+  id              String   @id @default(cuid())
+  orgId           String   @map("org_id")
+  vendorId        String   @map("vendor_id")
+  requestId       String?  @map("request_id")
+  quotationId     String?  @map("quotation_id")
+  evaluatorId     String   @map("evaluator_id")
+  qualityScore    Int      @map("quality_score")
+  deliveryScore   Int      @map("delivery_score")
+  complianceScore Int      @map("compliance_score")
+  comment         String?
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  organisation Organisation     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  vendor       Vendor           @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  request      PurchaseRequest? @relation(fields: [requestId], references: [id], onDelete: SetNull)
+  quotation    Quotation?       @relation(fields: [quotationId], references: [id], onDelete: SetNull)
+  evaluator    Profile          @relation("Evaluator", fields: [evaluatorId], references: [id])
+
+  @@index([vendorId])
+  @@index([orgId])
+  @@map("vendor_evaluations")
+}
+
+// ---------------------------------------------------------------------------
+// Approvals
+// ---------------------------------------------------------------------------
+
+model ApprovalStep {
+  id          String              @id @default(cuid())
+  requestId   String              @map("request_id")
+  level       Int
+  approverId  String              @map("approver_id")
+  status      ApprovalStepStatus  @default(WAITING)
+  activatedAt DateTime?           @map("activated_at")
+  decidedAt   DateTime?           @map("decided_at")
+  createdAt   DateTime            @default(now()) @map("created_at")
+
+  request  PurchaseRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  approver Profile         @relation("Approver", fields: [approverId], references: [id])
+  actions  ApprovalAction[]
+
+  @@unique([requestId, level])
+  @@index([approverId, status])
+  @@index([requestId])
+  @@map("approval_steps")
+}
+
+model ApprovalAction {
+  id        String             @id @default(cuid())
+  requestId String             @map("request_id")
+  stepId    String?            @map("step_id")
+  actorId   String             @map("actor_id")
+  action    ApprovalActionType
+  comment   String?
+  createdAt DateTime           @default(now()) @map("created_at")
+
+  request PurchaseRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  step    ApprovalStep?   @relation(fields: [stepId], references: [id], onDelete: SetNull)
+  actor   Profile         @relation("ActionActor", fields: [actorId], references: [id])
+
+  @@index([requestId, createdAt])
+  @@map("approval_actions")
+}
+
+// ---------------------------------------------------------------------------
+// Contracts, activity and audit
+// ---------------------------------------------------------------------------
+
+model Contract {
+  id           String         @id @default(cuid())
+  orgId        String         @map("org_id")
+  vendorId     String         @map("vendor_id")
+  ownerId      String         @map("owner_id")
+  title        String
+  value        Decimal        @db.Decimal(14, 2)
+  startDate    DateTime       @map("start_date") @db.Date
+  endDate      DateTime       @map("end_date") @db.Date
+  renewalDate  DateTime?      @map("renewal_date") @db.Date
+  status       ContractStatus @default(ACTIVE)
+  documentKey  String?        @map("document_key")
+  documentName String?        @map("document_name")
+  notes        String?
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+
+  organisation Organisation @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  vendor       Vendor       @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  owner        Profile      @relation("ContractOwner", fields: [ownerId], references: [id])
+
+  @@index([orgId, endDate])
+  @@index([vendorId])
+  @@map("contracts")
+}
+
+model Activity {
+  id         String   @id @default(cuid())
+  orgId      String   @map("org_id")
+  actorId    String   @map("actor_id")
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id")
+  requestId  String?  @map("request_id")
+  action     String
+  summary    String
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  organisation Organisation     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  actor        Profile          @relation("ActivityActor", fields: [actorId], references: [id])
+  request      PurchaseRequest? @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, createdAt])
+  @@index([requestId, createdAt])
+  @@map("activities")
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  orgId      String   @map("org_id")
+  actorId    String?  @map("actor_id")
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id")
+  action     String
+  before     Json?
+  after      Json?
+  ip         String?
+  userAgent  String?  @map("user_agent")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  organisation Organisation @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  actor        Profile?     @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([orgId, createdAt])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
